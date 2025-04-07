@@ -5,11 +5,10 @@ import hashlib
 import time
 import logging
 import base64
-from typing import List, Union, Dict, Any, Optional, Literal
-from datetime import datetime
+from typing import List, Dict, Any, Optional
 
 from openai import OpenAI
-from fastapi import FastAPI, HTTPException, Request, Depends, status, Body, Query
+from fastapi import FastAPI, HTTPException, Request, Depends, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
