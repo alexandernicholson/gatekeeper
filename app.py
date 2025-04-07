@@ -41,8 +41,11 @@ VISION_PROMPT = os.environ.get(
     "Analyze this image for a restaurant review or venue listing. "
     "Describe the content and identify anything inappropriate or irrelevant for a dining venue. "
     "Check for: non-food/restaurant content, offensive material, graphics/text overlays, "
-    "or poor quality. Is this image suitable for a restaurant listing or review? "
-    "End your analysis with one of these statements: 'VERDICT: APPROPRIATE' or 'VERDICT: INAPPROPRIATE'."
+    "or poor quality. Determine if this image is suitable for a restaurant listing or review. "
+    "Respond with a JSON object following this exact format: "
+    "{ \"analysis\": \"your detailed analysis here\", "
+    "\"is_suitable\": boolean indicating if the image is suitable for a restaurant listing (true/false) }. "
+    "The response must be valid JSON."
 )
 VISION_DETAIL = os.environ.get("GATEKEEPER_VISION_DETAIL", "auto")
 if VISION_DETAIL not in ["low", "high", "auto"]:
@@ -287,7 +290,7 @@ def prepare_input(inputs: List[ContentInput]) -> List[str]:
 
 async def analyze_image_with_vision(image_url: str, prompt: str = VISION_PROMPT, detail: str = VISION_DETAIL) -> Dict[str, Any]:
     """
-    Analyze an image using OpenAI's vision capabilities
+    Analyze an image using OpenAI's vision capabilities with structured output
     
     Returns:
         Dict with analysis text and whether the image is flagged as inappropriate
@@ -296,10 +299,14 @@ async def analyze_image_with_vision(image_url: str, prompt: str = VISION_PROMPT,
         raise ValueError("OpenAI API key is required for vision analysis")
 
     try:
-        # Create a message for the vision model
+        # Create a message with structured output for consistent verdict format
         response = client.chat.completions.create(
             model=VISION_MODEL,
             messages=[
+                {
+                    "role": "system",
+                    "content": "You are an image analyst that provides responses in JSON format."
+                },
                 {
                     "role": "user",
                     "content": [
@@ -314,27 +321,47 @@ async def analyze_image_with_vision(image_url: str, prompt: str = VISION_PROMPT,
                     ]
                 }
             ],
-            max_tokens=1000  # Adjust as needed
+            response_format={"type": "json_object"},
+            max_tokens=1000
         )
         
         # Extract the analysis from the response
-        analysis_text = ""
         if response and response.choices and len(response.choices) > 0:
-            analysis_text = response.choices[0].message.content
+            try:
+                # Parse and log JSON response
+                content = response.choices[0].message.content
+                security_logger.info(f"Vision model response: {content}")
+                result = json.loads(content)
+                
+                # Get the analysis text and verdict
+                analysis_text = result.get("analysis", "")
+                is_suitable = result.get("is_suitable", False)
+                
+                # Flag if not suitable
+                flagged = not is_suitable
+                
+                return {
+                    "analysis": analysis_text,
+                    "flagged": flagged
+                }
+            except json.JSONDecodeError as e:
+                # Fallback if not valid JSON
+                security_logger.error(f"Invalid JSON from vision model: {e}")
+                analysis_text = response.choices[0].message.content
+                flagged = "not suitable" in analysis_text.lower() or "inappropriate" in analysis_text.lower()
+                return {
+                    "analysis": analysis_text,
+                    "flagged": flagged
+                }
         else:
             analysis_text = "Analysis failed: No response from vision model."
-            
-        # Check if the image is flagged based on the verdict
-        flagged = False
-        if "VERDICT: INAPPROPRIATE" in analysis_text.upper():
-            flagged = True
-        
-        return {
-            "analysis": analysis_text,
-            "flagged": flagged
-        }
+            return {
+                "analysis": analysis_text,
+                "flagged": False
+            }
         
     except Exception as e:
+        security_logger.error(f"Error in image analysis: {str(e)}")
         return {
             "analysis": f"Analysis failed: {str(e)}",
             "flagged": False  # Conservative approach - if analysis fails, don't flag
