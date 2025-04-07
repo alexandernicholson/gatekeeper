@@ -270,6 +270,34 @@ The image analysis feature can be configured with these environment variables:
 | GATEKEEPER_VISION_DETAIL | Detail level for image analysis (low/high/auto) | auto |
 | GATEKEEPER_VISION_PROMPT | Custom prompt for image analysis | "Analyze this image for a restaurant review..." |
 
+### Moderation Threshold Configuration
+
+Gatekeeper allows you to set custom thresholds for each content category to override OpenAI's default flagging behavior. By default, OpenAI only flags content when it's highly confident the content violates their policies. You can adjust these thresholds to be more or less sensitive depending on your needs.
+
+Set these thresholds using environment variables with the pattern `GATEKEEPER_THRESHOLD_<CATEGORY>` where `<CATEGORY>` is the uppercase name of the category (e.g., HARASSMENT, HATE, SEXUAL, etc.).
+
+Examples:
+```
+GATEKEEPER_THRESHOLD_HARASSMENT=0.1
+GATEKEEPER_THRESHOLD_HATE=0.1
+GATEKEEPER_THRESHOLD_SEXUAL=0.3
+GATEKEEPER_THRESHOLD_VIOLENCE=0.2
+```
+
+For convenience, you can also set a global threshold that applies to all categories using:
+```
+GATEKEEPER_THRESHOLD_ALL=0.2
+```
+
+When using `GATEKEEPER_THRESHOLD_ALL`, this threshold will be applied to any category that doesn't have a specific threshold set. Category-specific thresholds will always take precedence over the global threshold.
+
+The threshold values range from 0.0 to 1.0:
+- A value of 0.0 would flag all content in that category
+- A value of 1.0 would only flag content if OpenAI is 100% confident it violates the policy
+- Default thresholds if not specified: harassment=0.1, hate=0.1
+
+When a category score from OpenAI exceeds your specified threshold, Gatekeeper will flag the content even if OpenAI's default classification did not flag it. This allows for fine-tuning the sensitivity of moderation based on your specific requirements.
+
 ### Error Handling
 
 The API returns appropriate HTTP status codes for different error scenarios:

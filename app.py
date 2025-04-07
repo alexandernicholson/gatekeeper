@@ -62,6 +62,30 @@ MAX_ITEMS_PER_REQUEST = int(os.environ.get("GATEKEEPER_MAX_ITEMS", "10"))
 RATE_LIMIT_TIMES = int(os.environ.get("GATEKEEPER_RATE_LIMIT_TIMES", "10"))
 RATE_LIMIT_SECONDS = int(os.environ.get("GATEKEEPER_RATE_LIMIT_SECONDS", "60"))
 
+# Moderation thresholds
+# Get all available thresholds with pattern GATEKEEPER_THRESHOLD_CATEGORY
+MODERATION_THRESHOLDS = {}
+
+# First check if there's a global threshold for all categories
+global_threshold = None
+if "GATEKEEPER_THRESHOLD_ALL" in os.environ:
+    try:
+        global_threshold = float(os.environ["GATEKEEPER_THRESHOLD_ALL"])
+        security_logger.info(f"Loaded global moderation threshold for all categories: {global_threshold}")
+    except ValueError:
+        security_logger.warning(f"Invalid global threshold value for GATEKEEPER_THRESHOLD_ALL: {os.environ['GATEKEEPER_THRESHOLD_ALL']} (must be a float)")
+
+# Then load category-specific thresholds (these will override the global threshold)
+for key, value in os.environ.items():
+    if key.startswith("GATEKEEPER_THRESHOLD_") and key != "GATEKEEPER_THRESHOLD_ALL":
+        category = key[len("GATEKEEPER_THRESHOLD_"):].lower()
+        try:
+            threshold = float(value)
+            MODERATION_THRESHOLDS[category] = threshold
+            security_logger.info(f"Loaded custom moderation threshold: {category}={threshold}")
+        except ValueError:
+            security_logger.warning(f"Invalid threshold value for {key}: {value} (must be a float)")
+
 # Initialize OpenAI client if API key is available
 client = None
 if OPENAI_API_KEY:
@@ -290,52 +314,95 @@ def prepare_input(inputs: List[ContentInput]) -> List[str]:
 
 async def analyze_image_with_vision(image_url: str, prompt: str = VISION_PROMPT, detail: str = VISION_DETAIL) -> Dict[str, Any]:
     """
-    Analyze an image using OpenAI's vision capabilities with structured output
+    Analyze an image using OpenAI's vision capabilities with structured output via the Responses API.
     
     Returns:
         Dict with analysis text and whether the image is flagged as inappropriate
     """
     if not OPENAI_API_KEY:
+        security_logger.error("OpenAI API key is required for vision analysis")
         raise ValueError("OpenAI API key is required for vision analysis")
+    
+    if not client:
+         security_logger.error("OpenAI client not initialized, cannot perform vision analysis.")
+         raise ValueError("OpenAI client not initialized")
+
+    # Define the desired JSON schema for the response
+    vision_schema = {
+        "type": "object",
+        "properties": {
+            "analysis": {
+                "type": "string",
+                "description": "Detailed analysis of the image content, checking for appropriateness and relevance to a restaurant listing or review."
+            },
+            "is_suitable": {
+                "type": "boolean",
+                "description": "Boolean indicating if the image is suitable for a restaurant listing (true) or not (false)."
+            }
+        },
+        "required": ["analysis", "is_suitable"],
+        "additionalProperties": False
+    }
 
     try:
-        # Create a message with structured output for consistent verdict format
-        response = client.chat.completions.create(
+        # Use the Responses API with structured output (json_schema)
+        response = client.responses.create(
             model=VISION_MODEL,
-            messages=[
+            input=[ # Renamed from 'messages'
                 {
                     "role": "system",
-                    "content": "You are an image analyst that provides responses in JSON format."
+                    "content": "You are an image analyst. Analyze the provided image based on the user's prompt and respond strictly in the specified JSON format."
                 },
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": prompt},
+                        {"type": "input_text", "text": prompt},
                         {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": image_url,
-                                "detail": detail
-                            }
+                            "type": "input_image",
+                            "image_url": image_url
                         }
                     ]
                 }
             ],
-            response_format={"type": "json_object"},
-            max_tokens=1000
+            text={ # Added 'text' parameter for structured output
+                "format": {
+                    "type": "json_schema",
+                    "name": "vision_analysis_result",
+                    "schema": vision_schema,
+                    "strict": True # Enforce schema adherence
+                }
+            }
         )
-        
-        # Extract the analysis from the response
-        if response and response.choices and len(response.choices) > 0:
+
+        # Handle potential errors or refusals based on response status
+        if response.status != "completed":
+            error_reason = response.incomplete_details.reason if response.incomplete_details else "unknown reason"
+            security_logger.error(f"Vision analysis incomplete: {response.status}, reason: {error_reason}")
+            # Return a default non-flagged response in case of incomplete analysis
+            return {
+                "analysis": f"Analysis failed: Incomplete response from model ({error_reason})",
+                "flagged": False 
+            }
+
+        # Check for refusal in the output content
+        if response.output and response.output[0].content and response.output[0].content[0].type == "refusal":
+             refusal_message = response.output[0].content[0].refusal
+             security_logger.warning(f"Vision analysis refused by model: {refusal_message}")
+             return {
+                "analysis": f"Analysis failed: Model refused request - {refusal_message}",
+                "flagged": False 
+             }
+
+        # Extract the analysis from the response output_text
+        if response.output_text:
             try:
-                # Parse and log JSON response
-                content = response.choices[0].message.content
-                security_logger.info(f"Vision model response: {content}")
-                result = json.loads(content)
+                # Parse and log JSON response from output_text
+                security_logger.info(f"Vision model response text: {response.output_text}")
+                result = json.loads(response.output_text)
                 
                 # Get the analysis text and verdict
-                analysis_text = result.get("analysis", "")
-                is_suitable = result.get("is_suitable", False)
+                analysis_text = result.get("analysis", "Analysis missing in response.")
+                is_suitable = result.get("is_suitable", False) # Default to not suitable if key missing
                 
                 # Flag if not suitable
                 flagged = not is_suitable
@@ -345,25 +412,26 @@ async def analyze_image_with_vision(image_url: str, prompt: str = VISION_PROMPT,
                     "flagged": flagged
                 }
             except json.JSONDecodeError as e:
-                # Fallback if not valid JSON
-                security_logger.error(f"Invalid JSON from vision model: {e}")
-                analysis_text = response.choices[0].message.content
+                # Fallback if not valid JSON (should be less likely with strict schema)
+                security_logger.error(f"Invalid JSON from vision model despite schema: {e}. Response text: {response.output_text}")
+                analysis_text = response.output_text # Return raw text if parsing fails
+                # Try a simple check in the raw text as a last resort
                 flagged = "not suitable" in analysis_text.lower() or "inappropriate" in analysis_text.lower()
                 return {
                     "analysis": analysis_text,
                     "flagged": flagged
                 }
         else:
-            analysis_text = "Analysis failed: No response from vision model."
+            security_logger.error("Vision analysis failed: No output_text from vision model.")
             return {
-                "analysis": analysis_text,
+                "analysis": "Analysis failed: No output text from vision model.",
                 "flagged": False
             }
         
     except Exception as e:
-        security_logger.error(f"Error in image analysis: {str(e)}")
+        security_logger.error(f"Error during vision analysis API call: {str(e)}", exc_info=True)
         return {
-            "analysis": f"Analysis failed: {str(e)}",
+            "analysis": f"Analysis failed due to exception: {str(e)}",
             "flagged": False  # Conservative approach - if analysis fails, don't flag
         }
 
@@ -419,12 +487,45 @@ async def moderate_content(
             # Convert response to dict
             response_dict = response.model_dump() if hasattr(response, "model_dump") else response
             
-            # Check if any individual content item was flagged by moderation API
+            # Apply custom thresholds to individual results
             if "results" in response_dict:
-                for result in response_dict["results"]:
+                for i, result in enumerate(response_dict["results"]):
+                    original_flagged = result.get("flagged", False)
+                    
+                    # Check categories against custom thresholds
+                    for category, threshold in MODERATION_THRESHOLDS.items():
+                        score = result.get("category_scores", {}).get(category, 0)
+                        if score >= threshold:
+                            # Log that we're overriding the default flagging
+                            security_logger.info(f"Custom threshold triggered: {category}={score} exceeds threshold {threshold}")
+                            # Set the category to flagged
+                            result["categories"][category] = True
+                            # Set the overall result to flagged
+                            result["flagged"] = True
+                    
+                    # Also check with global threshold for categories without specific thresholds
+                    if global_threshold is not None:
+                        for category, score in result.get("category_scores", {}).items():
+                            # Skip categories that already have a specific threshold
+                            if category in MODERATION_THRESHOLDS:
+                                continue
+                            
+                            # Skip None or non-numeric scores
+                            if score is None:
+                                continue
+                                
+                            if score >= global_threshold:
+                                security_logger.info(f"Global threshold triggered: {category}={score} exceeds global threshold {global_threshold}")
+                                # Set the category to flagged
+                                result["categories"][category] = True
+                                # Set the overall result to flagged
+                                result["flagged"] = True
+                    
+                    # Check if any content was flagged after custom threshold check
                     if result.get("flagged", False):
                         any_content_flagged = True
-                        break
+                    
+                    security_logger.info(f"Moderation result for item {i}: original_flagged={original_flagged}, after_custom_check={result.get('flagged', False)}")
         
         # Perform combined text moderation
         combined_text_flagged = False
@@ -440,11 +541,47 @@ async def moderate_content(
                 combined_response_dict = combined_response.model_dump() if hasattr(combined_response, "model_dump") else combined_response
                 
                 # Add combined text moderation results to response
-                response_dict["combined_text_moderation"] = combined_response_dict.get("results", [{}])[0]
-                
-                # Check if combined text was flagged
-                if combined_response_dict.get("results") and combined_response_dict["results"][0].get("flagged", False):
-                    combined_text_flagged = True
+                if combined_response_dict.get("results"):
+                    combined_result = combined_response_dict.get("results", [{}])[0]
+                    response_dict["combined_text_moderation"] = combined_result
+                    
+                    # Apply custom thresholds to combined result
+                    original_flagged = combined_result.get("flagged", False)
+                    
+                    for category, threshold in MODERATION_THRESHOLDS.items():
+                        score = combined_result.get("category_scores", {}).get(category, 0)
+                        if score >= threshold:
+                            # Log that we're overriding the default flagging
+                            security_logger.info(f"Custom threshold triggered for combined text: {category}={score} exceeds threshold {threshold}")
+                            # Set the category to flagged
+                            combined_result["categories"][category] = True
+                            # Set the overall result to flagged
+                            combined_result["flagged"] = True
+                    
+                    # Also check with global threshold for categories without specific thresholds
+                    if global_threshold is not None:
+                        for category, score in combined_result.get("category_scores", {}).items():
+                            # Skip categories that already have a specific threshold
+                            if category in MODERATION_THRESHOLDS:
+                                continue
+                            
+                            # Skip None or non-numeric scores
+                            if score is None:
+                                continue
+                                
+                            if score >= global_threshold:
+                                security_logger.info(f"Global threshold triggered for combined text: {category}={score} exceeds global threshold {global_threshold}")
+                                # Set the category to flagged
+                                combined_result["categories"][category] = True
+                                # Set the overall result to flagged
+                                combined_result["flagged"] = True
+                    
+                    # Check if combined text was flagged after custom threshold check
+                    if combined_result.get("flagged", False):
+                        combined_text_flagged = True
+                        
+                    security_logger.info(f"Combined moderation result: original_flagged={original_flagged}, after_custom_check={combined_result.get('flagged', False)}")
+                    
             except Exception as e:
                 security_logger.error(f"Error performing combined text moderation: {str(e)}")
                 # Add empty combined moderation result if it fails
