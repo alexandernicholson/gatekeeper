@@ -1,3 +1,5 @@
+![DA462B11-95AE-4C23-A10C-E14F2C9D5CCA](https://github.com/user-attachments/assets/c8cdf83d-3e3a-4879-afc7-7299298e2f2d)
+
 # Gatekeeper
 Image and text moderation service powered by OpenAI's moderation API.
 
