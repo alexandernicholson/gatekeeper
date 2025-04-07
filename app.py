@@ -37,13 +37,12 @@ API_KEYS = os.environ.get("GATEKEEPER_API_KEYS", "").split(",")
 ENABLE_VISION = os.environ.get("GATEKEEPER_ENABLE_VISION", "false").lower() in ("true", "1", "t")
 VISION_PROMPT = os.environ.get(
     "GATEKEEPER_VISION_PROMPT", 
-    "Analyze this image for a restaurant review or venue listing. "
-    "Describe the content and identify anything inappropriate or irrelevant for a dining venue. "
-    "Check for: non-food/restaurant content, offensive material, graphics/text overlays, "
-    "or poor quality. Determine if this image is suitable for a restaurant listing or review. "
+    "Analyze this image. "
+    "Check for: offensive material, graphics/text overlays, or poor quality. "
+    "Is this image suitable?"
     "Respond with a JSON object following this exact format: "
     "{ \"analysis\": \"your detailed analysis here\", "
-    "\"is_suitable\": boolean indicating if the image is suitable for a restaurant listing (true/false) }. "
+    "\"is_suitable\": boolean indicating if the image is suitable (true/false) }. "
     "The response must be valid JSON."
 )
 VISION_DETAIL = os.environ.get("GATEKEEPER_VISION_DETAIL", "auto")
